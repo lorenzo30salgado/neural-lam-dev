@@ -7,8 +7,9 @@ output:
     forcing: [analysis_time, elapsed_forecast_duration, grid_index, forcing_feature]
   coord_ranges:
     time:
-      start: 2015-11-28T00:00
-      end: 2020-10-29T00:00
+      # IFS sample forecasts anchored around Jan–Feb 2016 (6-hourly analysis times) 1 semaine
+      start: 2016-01-01T00:00
+      end: 2016-02-29T18:00
       step: PT6H
   chunking:
     analysis_time: 1
@@ -17,25 +18,25 @@ output:
     dim: analysis_time
     splits:
       train:
-        start: 2015-11-28T00:00
-        end: 2019-09-30T00:00
+        start: 2016-01-01T00:00
+        end: 2016-02-21T18:00
         compute_statistics:
           ops: [mean, std, diff_mean, diff_std]
           dims: [grid_index, analysis_time, elapsed_forecast_duration]
       val:
-        start: 2019-09-30T00:00
-        end: 2019-10-30T00:00
+        start: 2016-02-22T00:00
+        end: 2016-02-25T18:00
       test:
-        start: 2019-10-30T00:00
-        end: 2020-10-29T00:00
+        start: 2016-02-26T00:00
+        end: 2016-02-29T18:00
   domain_cropping:
     margin_width_degrees: 7.19
-    interior_dataset_config_path: cosmo_interior_config.yaml
+    interior_dataset_config_path: scripts/cosmo_interior_config.yaml
     include_interior_points: True
 
 inputs:
   era_surface:
-    path: 'cosmo_ifs.zarr'
+    path: ifs_subset.zarr
     dims: [time, prediction_timedelta, longitude, latitude]
     variables:
       - mean_sea_level_pressure
@@ -91,52 +92,8 @@ inputs:
         dims: [longitude, latitude]
     target_output_variable: forcing
 
-  era_height_levels:
-    path: 'cosmo_ifs.zarr'
-    dims: [time, prediction_timedelta, longitude, latitude, level]
-    variables:
-      u_component_of_wind:
-        level:
-          values: [100, 200, 400, 600, 700, 850, 925, 1000]
-          units: m/s
-      v_component_of_wind:
-        level:
-          values: [100, 200, 400, 600, 700, 850, 925, 1000]
-          units: m/s
-      temperature:
-        level:
-          values: [100, 200, 400, 600, 700, 850, 925, 1000]
-          units: K
-      specific_humidity:
-        level:
-          values: [100, 200, 400, 600, 700, 850, 925, 1000]
-          units: kg/kg
-      geopotential:
-        level:
-          values: [100, 200, 400, 600, 700, 850, 925, 1000]
-          units: m^2/s^2
-      vertical_velocity:
-        level:
-          values: [100, 200, 400, 600, 700, 850, 925, 1000]
-          units: Pa/s^2
-    dim_mapping:
-      analysis_time:
-        method: rename
-        dim: time
-      elapsed_forecast_duration:
-        method: rename
-        dim: prediction_timedelta
-      forcing_feature:
-        method: stack_variables_by_var_name
-        dims: [level]
-        name_format: "{var_name}{level}hPa"
-      grid_index:
-        method: stack
-        dims: [longitude, latitude]
-    target_output_variable: forcing
-
   era_static:
-    path: 'cosmo_era5.zarr'
+    path: era_subset.zarr
     dims: [time, longitude, latitude, level]
     variables:
       - land_sea_mask
