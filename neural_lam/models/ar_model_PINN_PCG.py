@@ -412,25 +412,23 @@ class ARModel(pl.LightningModule):
             nu=0.01,
         )
 
-        # 5) Liste des paramètres (ordre stable)
         params = [p for p in self.parameters() if p.requires_grad]
 
-        # ---------- Gradients DATA ----------
+
         self.manual_backward(data_loss, retain_graph=True)
         grads_data = [p.grad.detach().clone() if p.grad is not None else torch.zeros_like(p) 
                     for p in params]
-        # On remet les grads à zéro avant l'autre backward
         for p in params:
             p.grad = None
 
-        # ---------- Gradients PHYSIQUE ----------
+        
         self.manual_backward(phys_loss, retain_graph=True)
         grads_phys = [p.grad.detach().clone() if p.grad is not None else torch.zeros_like(p) 
                     for p in params]
         for p in params:
             p.grad = None
 
-        # ---------- Projection des gradients (PCGrad-like) ----------
+        
         gD_flat = torch.cat([g.view(-1) for g in grads_data])
         gP_flat = torch.cat([g.view(-1) for g in grads_phys])
 
@@ -438,28 +436,24 @@ class ARModel(pl.LightningModule):
 
         if dot < 0:
             if torch.rand(()) < 0.5:
-                # Projeter la composante PDE sur le complément de data
                 denom = (gP_flat.pow(2).sum() + 1e-12)
                 proj = dot / denom
                 grads_data = [gD - proj * gP for gD, gP in zip(grads_data, grads_phys)]
             else:
-                # Projeter la composante data sur le complément de PDE
                 denom = (gD_flat.pow(2).sum() + 1e-12)
                 proj = dot / denom
                 grads_phys = [gP - proj * gD for gD, gP in zip(grads_data, grads_phys)]
 
-        # ---------- Gradient final = somme ----------
         final_grads = [gD + gP for gD, gP in zip(grads_data, grads_phys)]
 
-        # Assigner les gradients aux paramètres
+
         for p, g in zip(params, final_grads):
             p.grad = g
 
-        # Step optimiseur
+
         opt.step()
 
-        # ---------- Logging ----------
-        # Loss "totale" juste pour suivi (PDE + data), mais gradient = projété !
+
         total_loss_for_logging = data_loss + phys_loss
 
         self.log("train_data_loss", data_loss,
@@ -469,8 +463,6 @@ class ARModel(pl.LightningModule):
         self.log("train_total_loss", total_loss_for_logging,
                 on_step=True, on_epoch=True, prog_bar=True, batch_size=batch[0].shape[0])
 
-        # Lightning accepte qu'on retourne n'importe quel scalaire pour monitor,
-        # ici on renvoie la somme pour cohérence.
         return total_loss_for_logging.detach()
 
     def _build_physics_grid(self, split: str = "train"):
@@ -627,17 +619,15 @@ class ARModel(pl.LightningModule):
         Ny = y_m.shape[0]
         Nx = x_m.shape[0]
 
-        # approximate constant spacing
+        
         dx = float(x_m[1] - x_m[0]) if Nx > 1 else 1.0
         dy = float(y_m[1] - y_m[0]) if Ny > 1 else 1.0
 
-        # 2) Rescale to physical units (no detach!)
-        #    state_std / state_mean are buffers on the module, shape (d_f,)
+        
         pred_rescaled = prediction * self.state_std + self.state_mean
         B, T, _, _ = pred_rescaled.shape
 
-        # 2b) charger les états externes sur la même grille, standardisés,
-        # puis les remettre en unités physiques comme pour prediction
+        
         external_states_std = self._get_external_states_for_batch(
             batch_times=batch_times,
             split=split,
@@ -668,17 +658,17 @@ class ARModel(pl.LightningModule):
 
             t_s = (times_b - times_b[0]).to(device=device, dtype=dtype) * 1e-9
 
-            # sélectionner u,v,p de la prédiction
+            
             u_nodes = pred_b[:, :, u_idx]
             v_nodes = pred_b[:, :, v_idx]
             p_nodes = pred_b[:, :, p_idx]
 
-            # re-ordonner sur la grille (T, Ny, Nx)
+            
             u_grid = u_nodes[:, idx_flat].view(T, Ny, Nx)
             v_grid = v_nodes[:, idx_flat].view(T, Ny, Nx)
             p_grid = p_nodes[:, idx_flat].view(T, Ny, Nx)
 
-            # si on a des états externes, même opération
+           
             if ext_b is not None:
                 u_ext_nodes = ext_b[:, :, u_idx]
                 v_ext_nodes = ext_b[:, :, v_idx]
@@ -690,22 +680,21 @@ class ARModel(pl.LightningModule):
             else:
                 u_ext_grid = v_ext_grid = p_ext_grid = None
 
-            # dérivées temporelles/spatiales sur u_grid, v_grid, p_grid
+           
             u_t = self._time_derivative(u_grid, t_s)
             v_t = self._time_derivative(v_grid, t_s)
             u_x, u_xx, u_y, u_yy = self._spatial_derivatives(u_grid, dx, dy)
             v_x, v_xx, v_y, v_yy = self._spatial_derivatives(v_grid, dx, dy)
             p_x, _, p_y, _ = self._spatial_derivatives(p_grid, dx, dy)
 
-            # résidus Navier–Stokes classiques
+            
             f_u = u_t + (u_grid * u_x + v_grid * u_y) + p_x - nu_torch * (u_xx + u_yy)
             f_v = v_t + (u_grid * v_x + v_grid * v_y) + p_y - nu_torch * (v_xx + v_yy)
             f_e = u_x + v_y
 
+            #Lateral boundary relaxation conditions
             if u_ext_grid is not None:
-                # -------------------------
-                # 1) Profils N(x), D(x)
-                # -------------------------
+                
                 N_field_2d, D_field_2d, mask_core, mask_buffer, edge_mask = \
                     self._build_relaxation_profiles(
                         Ny=Ny,
@@ -713,20 +702,15 @@ class ARModel(pl.LightningModule):
                         device=device,
                         dtype=dtype,
                     )
-                # étendre en 3D (T, Ny, Nx)
+                
                 N_field = N_field_2d.unsqueeze(0).expand(T, -1, -1)
                 D_field = D_field_2d.unsqueeze(0).expand(T, -1, -1)
 
-                # -------------------------
-                # 2) Différences modèle - large scale
-                # -------------------------
+                
                 delta_u = u_grid - u_ext_grid         # (T, Ny, Nx)
                 delta_v = v_grid - v_ext_grid
 
-                # -------------------------
-                # 3) Laplaciens de la différence
-                #    D(x) * ∇²(a - a_LS)
-                # -------------------------
+                
                 _, delta_uxx, _, delta_uyy = self._spatial_derivatives(
                     delta_u, dx, dy
                 )
@@ -737,14 +721,11 @@ class ARModel(pl.LightningModule):
                 )
                 lap_delta_v = delta_vxx + delta_vyy
 
-                # -------------------------
-                # 4) Ajout dans les résidus
-                #    ∂t a + ... + N(x)(a - a_LS) - D(x)∇²(a - a_LS) ≈ 0
-                # -------------------------
+               
                 f_u = f_u + N_field * delta_u - D_field * lap_delta_u
                 f_v = f_v + N_field * delta_v - D_field * lap_delta_v
 
-            # Enfin: loss
+            
             f_u_loss = (f_u ** 2).mean()
             f_v_loss = (f_v ** 2).mean()
             f_e_loss = (f_e ** 2).mean()
@@ -758,56 +739,50 @@ class ARModel(pl.LightningModule):
     
     def _build_external_state_cache(self, split: str = "train"):
         """
-        Charge les champs de grande échelle (datastore_boundary) et les
-        remappe sur la grille interne. Cache le résultat pour un split donné.
+        Loads large-scale fields (datastore_boundary) and remaps them to the internal grid. Caches the result for a given split.
 
-        Après appel, on aura par ex:
-        self._ext_state_da[split] : xr.DataArray
-            dims: (time, grid_index, state_feature)
-            sur la même grille interne que self._datastore
+        After calling, we will have, for example:
+        self._ext_state_da[split]: xr.DataArray
+        dims: (time, grid_index, state_feature)
+        on the same internal grid as self._datastore
         """
         if not self.boundary_forced:
             return
 
-        # Cache déjà construit ?
+        
         if hasattr(self, "_ext_state_da") and split in self._ext_state_da:
             return
 
         if not hasattr(self, "_ext_state_da"):
             self._ext_state_da = {}
 
-        # 1) Charger intérieur / extérieur SANS standardisation
+        
         da_int_state = self._datastore.get_dataarray(
             category="state", split=split, standardize=False
         )
         da_ext = self.datastore_boundary.get_dataarray(
-            category="forcing",  # ou "state" si tu as mis ERA5 ici
+            category="forcing",  
             split=split,
             standardize=False,
         )
 
-        # 2) Unstacker les coords de grille pour avoir 4 dims
-        #    intérieur : (time, state_feature, x, y) (dans Neural-LAM)
-        #    extérieur : souvent (time, forcing_feature, longitude, latitude)
-        from ..datastore.base import BaseRegularGridDatastore  # au cas où
 
         if isinstance(self._datastore, BaseRegularGridDatastore):
             da_int_unstack = self._datastore.unstack_grid_coords(da_int_state)
         else:
-            raise RuntimeError("datastore interne n'est pas un BaseRegularGridDatastore")
+            raise RuntimeError("internal datastore is not a BaseRegularGridDatastore")
 
         if isinstance(self.datastore_boundary, BaseRegularGridDatastore):
             da_ext_unstack = self.datastore_boundary.unstack_grid_coords(da_ext)
         else:
-            raise RuntimeError("datastore_boundary n'est pas un BaseRegularGridDatastore")
+            raise RuntimeError("datastore_boundary is not a BaseRegularGridDatastore")
 
-        # === Intérieur : on sait que c'est (time, state_feature, x, y) ===
+        
         da_int_unstack = da_int_unstack.transpose("time", "state_feature", "x", "y")
         x_int = da_int_unstack.coords["x"]
         y_int = da_int_unstack.coords["y"]
 
-        # === Extérieur : détecter dynamiquement les noms de dims ===
-        # feature dim : "state_feature" ou "forcing_feature" ou "feature"
+
         if "state_feature" in da_ext_unstack.dims:
             ext_feature_dim = "state_feature"
         elif "forcing_feature" in da_ext_unstack.dims:
@@ -815,39 +790,36 @@ class ARModel(pl.LightningModule):
         elif "feature" in da_ext_unstack.dims:
             ext_feature_dim = "feature"
         else:
-            # fallback: on prend la 2e dim après "time"
+
             ext_feature_dim = [d for d in da_ext_unstack.dims if d != "time"][0]
 
-        # dims spatiales : ("x","y") ou ("longitude","latitude")
+
         if "x" in da_ext_unstack.dims and "y" in da_ext_unstack.dims:
             ext_x_dim, ext_y_dim = "x", "y"
         elif "longitude" in da_ext_unstack.dims and "latitude" in da_ext_unstack.dims:
-            # On va considérer longitude ~ x, latitude ~ y
+
             ext_x_dim, ext_y_dim = "longitude", "latitude"
         else:
-            # fallback : on prend les 2 dernières dims comme spatiales
+
             ext_y_dim, ext_x_dim = da_ext_unstack.dims[-2], da_ext_unstack.dims[-1]
 
-        # transposer extérieur dans l'ordre (time, feature, x, y) avec les bons noms
+
         da_ext_unstack = da_ext_unstack.transpose("time", ext_feature_dim, ext_x_dim, ext_y_dim)
 
-        # 3) Interpoler les champs externes sur la grille interne
-        #    -> nearest neighbour en x/y (lon/lat)
+
         da_ext_on_int = da_ext_unstack.interp(
             {ext_x_dim: x_int, ext_y_dim: y_int},
             method="nearest",
         )
-        # dims ~ (time, ext_feature_dim, x, y) mais x/y ont maintenant les coords de l'interne
 
-        # 4) Restack en grid_index pour avoir (time, grid_index, feature_ext)
         da_ext_on_int = da_ext_on_int.stack(grid_index=("x", "y"))
         da_ext_on_int = da_ext_on_int.transpose("time", "grid_index", ext_feature_dim)
 
-        # 5) Construire un mapping explicite intérieur ↔ externe
+
         int_var_names = list(self._datastore.get_vars_names(category="state"))
         ext_var_names = list(self.datastore_boundary.get_vars_names(category="forcing"))
 
-        # dictionnaire: nom_interne -> nom_dans_datastore_boundary
+
         name_map_int_to_ext = {
             "U_10M": "10m_u_component_of_wind",
             "V_10M": "10m_v_component_of_wind",
@@ -865,7 +837,7 @@ class ARModel(pl.LightningModule):
         from loguru import logger
 
         if len(int_idx) == 0:
-            # Pas de recouvrement -> on mettra tout à zéro (aucune relaxation utile)
+
             logger.warning(
                 "Aucun recouvrement de variables entre datastore interne "
                 "et boundary pour la relaxation."
@@ -889,11 +861,10 @@ class ARModel(pl.LightningModule):
             self._ext_state_da[split] = da_ext_remapped
             return
 
-        # On extrait seulement les variables externes utiles (U,V,PMSL...)
-        # Attention: ici on isel le long de ext_feature_dim, pas "state_feature"
-        da_ext_sel = da_ext_on_int.isel({ext_feature_dim: ext_idx})  # (time, grid_index, len(ext_idx))
 
-        # 6) Remplir un tableau complet (time, grid_index_int, d_f_int)
+        da_ext_sel = da_ext_on_int.isel({ext_feature_dim: ext_idx}) 
+
+
         d_f_int = len(int_var_names)
         data = np.zeros(
             (
@@ -903,10 +874,9 @@ class ARModel(pl.LightningModule):
             ),
             dtype=np.float32,
         )
-        # on copie chaque variable externe dans la bonne position interne
+
         data[:, :, int_idx] = da_ext_sel.values
 
-        # Reconstruire un DataArray propre sur la grille interne, avec les NOMS internes
         da_ext_remapped = xr.DataArray(
             data,
             dims=("time", "grid_index", "state_feature"),
@@ -935,38 +905,37 @@ class ARModel(pl.LightningModule):
         if not self.boundary_forced:
             return None
 
-        # S'assurer que le cache est prêt
         self._build_external_state_cache(split=split)
         da_ext = self._ext_state_da[split]  # (time, grid_index, state_feature)
 
-        # Conversion des temps batch_times (ns int64) vers datetime64 pour xarray
+
         times_np = batch_times.detach().cpu().numpy().astype("datetime64[ns]")
         B, T = times_np.shape
 
         ext_list = []
         for b in range(B):
-            # Sélection des temps externes les plus proches
+
             da_sel = da_ext.sel(time=times_np[b], method="nearest")  # (T, grid_index, state_feature)
             ext_list.append(torch.from_numpy(da_sel.values))  # (T, G, F)
 
         external = torch.stack(ext_list, dim=0)  # (B, T, G, F)
         external = external.to(batch_times.device).to(torch.float32)
 
-        # 1) Nettoyer NaN / ±inf venant d'ERA5 / interpolation
+
         external = torch.nan_to_num(
             external,
-            nan=0.0,    # NaN -> 0 (on forcera quasiment pas si tu calibrres bien N(x))
+            nan=0.0,    
             posinf=0.0,
             neginf=0.0,
         )
 
-        # 2) Standardiser avec les mêmes stats que l’interne
+
         state_std_safe = self.state_std.clone()
-        state_std_safe[state_std_safe == 0] = 1.0  # éviter /0 si std nulle
+        state_std_safe[state_std_safe == 0] = 1.0  
 
         external_std = (external - self.state_mean) / state_std_safe
 
-        # 3) Re-nettoyer au cas où (0 * inf, etc.)
+
         external_std = torch.nan_to_num(
             external_std,
             nan=0.0,
@@ -984,26 +953,28 @@ class ARModel(pl.LightningModule):
         dtype: torch.dtype,
         ):
         """
-        Construit les champs 2D:
-        - N_field_2d(y,x)  : coefficient de relaxation newtonienne (s^-1)
-        - D_field_2d(y,x)  : coefficient diffusif (m^2 s^-1)
-        ainsi que les masques core/buffer/edge.
+        Builds the 2D fields:
+        - N_field_2d(y,x): Newtonian relaxation coefficient (s⁻¹)
+        - D_field_2d(y,x): diffusive coefficient (m² s⁻¹)
+        as well as the core/buffer/edge masks.
 
-        L'idée:
-        * zone tampon d'épaisseur W = self.args.relax_width
-        * N(x) = 0 dans le coeur, croît vers le bord (profil linéaire ou exp)
-        * option: facteur plus fort sur la rangée de bord (edge_factor)
-        * D(x) proportionnel à N(x) (simplification raisonnable)
+                The idea:
+                * buffer zone with thickness W = self.args.relax_width
+                * N(x) = 0 in the core, increases towards the edge (linear or exp profile)
+                * option: stronger factor on the edge row (edge_factor)
+                * D(x) proportional to N(x) (reasonable simplification)
+
+        Translated with DeepL.com (free version)
         """
-        W = 10 # nb de points dans le buffer
+        W = 10
 
-        # --- masques core / buffer ---
+
         mask_core = torch.zeros((Ny, Nx), dtype=torch.bool, device=device)
         if W > 0 and 2 * W < min(Ny, Nx):
             mask_core[W:Ny - W, W:Nx - W] = True
         mask_buffer = ~mask_core
 
-        # distance entière au bord (0 au bord, 1,2,... vers l'intérieur)
+
         iy = torch.arange(Ny, device=device).view(Ny, 1)
         ix = torch.arange(Nx, device=device).view(1, Nx)
         dist_y = torch.minimum(iy, Ny - 1 - iy)
@@ -1012,33 +983,33 @@ class ARModel(pl.LightningModule):
 
         edge_mask = (dist_edge == 0)
 
-        # distance "dans le buffer": clampée à W-1
+
         if W > 0:
             dist_buffer = dist_edge.clamp(max=W - 1).float()
-            # r = 0 à l'intérieur, 1 au bord externe du buffer
+
             r = (W - 1 - dist_buffer) / max(W - 1, 1)
             r = r * mask_buffer.float()
         else:
             r = torch.zeros((Ny, Nx), dtype=torch.float32, device=device)
 
-        # --- profil de forme pour N(x) ---
+
         profile_type = getattr(self.args, "relax_profile", "linear")
         if profile_type == "exp":
-            # profil exponentiel façon EXP-? (croissance plus forte près du bord)
+
             gamma = float(getattr(self.args, "relax_exp_gamma", 3.0))
-            # normalisation: f(0)=0, f(1)=1
+
             num = torch.expm1(gamma * r)
             den = torch.expm1(torch.tensor(gamma, device=device))
             shape_N = num / (den + 1e-12)
         else:
-            # linéaire par défaut
+
             shape_N = r
 
-        # amplitude max au bord (s^-1)
+
         alpha_max = 0.7  # ex: 1 / tau
         N_field_2d = alpha_max * shape_N  # (Ny, Nx)
 
-        # renforcement sur la rangée de bord (a ≈ a_LS)
+
         edge_factor = float(getattr(self.args, "relax_edge_factor", 1.0))
         if edge_factor != 1.0:
             N_field_2d = torch.where(
@@ -1047,12 +1018,10 @@ class ARModel(pl.LightningModule):
                 N_field_2d,
             )
 
-        # --- coefficients diffusifs ---
-        # simplification: D(x) = D_max * shape_N  (m^2/s)
+
         D_max = float(getattr(self.args, "relax_diff_coef", 0.0))
         D_field_2d = D_max * shape_N  # (Ny, Nx)
 
-        # cast dans le bon dtype
         N_field_2d = N_field_2d.to(dtype=dtype)
         D_field_2d = D_field_2d.to(dtype=dtype)
 
